@@ -1,0 +1,12 @@
+monitored_files:
+  - /tmp/testfile
+  - /etc/passwd
+  - /etc/shadow
+
+ignore_actions:
+  - read
+  - stat
+
+ignore_users:
+  - backupuser
+  - harsha
