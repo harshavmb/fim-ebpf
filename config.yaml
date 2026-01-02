@@ -8,5 +8,4 @@ ignore_actions:
   - stat
 
 ignore_users:
-  - backupuser
-  - harsha
+  - root

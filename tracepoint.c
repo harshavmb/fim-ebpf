@@ -52,14 +52,12 @@ static inline __u32 simple_hash(const char *str) {
     return hash;
 }
 
-SEC("tracepoint/syscalls/sys_enter_openat")
-int trace_openat(struct sys_enter_args *ctx) {
-
+static inline int handle_event(struct sys_enter_args *ctx, const char *filename_ptr, __u32 flags) {
     struct event e = {};
     long ret;
     
     // Read filename
-    ret = bpf_probe_read_user_str(e.filename, sizeof(e.filename), (void *)ctx->args[1]);
+    ret = bpf_probe_read_user_str(e.filename, sizeof(e.filename), (void *)filename_ptr);
     if (ret <= 0) return 0;
 
     // Debug: Print every filename accessed
@@ -101,10 +99,25 @@ int trace_openat(struct sys_enter_args *ctx) {
     // Get process info
     e.pid = bpf_get_current_pid_tgid() >> 32;
     bpf_get_current_comm(&e.comm, sizeof(e.comm));
-    e.flags = ctx->args[2];
+    e.flags = flags;
     
     bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &e, sizeof(e));
     return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_openat")
+int trace_openat(struct sys_enter_args *ctx) {
+    return handle_event(ctx, (const char *)ctx->args[1], (__u32)ctx->args[2]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_unlink")
+int trace_unlink(struct sys_enter_args *ctx) {
+    return handle_event(ctx, (const char *)ctx->args[0], 0);
+}
+
+SEC("tracepoint/syscalls/sys_enter_unlinkat")
+int trace_unlinkat(struct sys_enter_args *ctx) {
+    return handle_event(ctx, (const char *)ctx->args[1], (__u32)ctx->args[2]);
 }
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
