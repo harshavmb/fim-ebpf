@@ -32,6 +32,7 @@ type event struct {
 	Comm         [16]byte
 	Filename     [256]byte
 	Flags        uint32
+	EventType    uint32
 }
 
 // simpleHash implements the same DJB2-like hash as the eBPF C code.
@@ -115,6 +116,24 @@ func main() {
 	}
 	defer tp.Close()
 
+	tpUnlink, err := link.Tracepoint("syscalls", "sys_enter_unlink", objs.TraceUnlink, nil)
+	if err != nil {
+		// sys_enter_unlink might not exist on all architectures (e.g., arm64 uses unlinkat)
+		// so we just log it as info/debug rather than a warning if it's missing.
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("Note: sys_enter_unlink not available: %v", err)
+		}
+	} else {
+		defer tpUnlink.Close()
+	}
+
+	tpUnlinkat, err := link.Tracepoint("syscalls", "sys_enter_unlinkat", objs.TraceUnlinkat, nil)
+	if err != nil {
+		log.Printf("Warning: failed to attach sys_enter_unlinkat: %v", err)
+	} else {
+		defer tpUnlinkat.Close()
+	}
+
 	rd, err := perf.NewReader(objs.Events, os.Getpagesize())
 	if err != nil {
 		log.Fatal(err)
@@ -155,7 +174,7 @@ func main() {
 			}
 
 			// Skip ignored actions
-			if isReadOperation(e.Flags) && contains(cfg.IgnoreActions, "read") {
+			if e.EventType == 0 && isReadOperation(e.Flags) && contains(cfg.IgnoreActions, "read") {
 				continue
 			}
 
@@ -169,7 +188,8 @@ func main() {
 
 			// With this more robust version:
 			userInfo := fmt.Sprintf("%d (%s)", e.Uid, currentUsername)
-			if e.Loginuid != 0 && e.Uid != e.Loginuid {
+			// 4294967295 is AUDIT_UID_UNSET ((u32)-1)
+			if e.Loginuid != 4294967295 && e.Uid != e.Loginuid {
 				loginUser, err := user.LookupId(fmt.Sprintf("%d", e.Loginuid))
 				loginUsername := "unknown"
 				if err == nil {
@@ -179,12 +199,18 @@ func main() {
 					e.Uid, currentUsername, e.Loginuid, loginUsername)
 			}
 
-			log.Printf("Event: PID=%d UID=%d (%s) CMD=%s FILE=%s FLAGS=%08x",
+			action := "OPEN"
+			if e.EventType == 1 {
+				action = "DELETE"
+			}
+
+			log.Printf("Event: PID=%d UID=%d (%s) CMD=%s FILE=%s ACTION=%s FLAGS=%08x",
 				e.Pid,
 				e.Uid,
 				userInfo,
 				string(bytes.TrimRight(e.Comm[:], "\x00")),
 				string(bytes.TrimRight(e.Filename[:], "\x00")),
+				action,
 				e.Flags,
 			)
 		}

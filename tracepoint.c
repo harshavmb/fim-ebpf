@@ -21,6 +21,7 @@ struct event {
     char comm[16];
     char filename[256];   // Full filename for userspace verification
     __u32 flags;
+    __u32 event_type;     // 0: OPEN, 1: UNLINK
 };
 
 struct {
@@ -52,7 +53,7 @@ static inline __u32 simple_hash(const char *str) {
     return hash;
 }
 
-static inline int handle_event(struct sys_enter_args *ctx, const char *filename_ptr, __u32 flags) {
+static inline int handle_event(struct sys_enter_args *ctx, const char *filename_ptr, __u32 flags, __u32 type) {
     struct event e = {};
     long ret;
     
@@ -75,31 +76,37 @@ static inline int handle_event(struct sys_enter_args *ctx, const char *filename_
     e.uid = uid_gid;
     e.euid = (uid_gid >> 32);
     
-    struct task_struct *task;
-    struct task_struct *parent;
-    task = (struct task_struct *)bpf_get_current_task();
-    ret = bpf_probe_read(&parent, sizeof(parent), &task->real_parent);
-    if (ret != 0 || !parent) {
-        // Handle the case where real_parent is not available (e.g., init process)
-        e.loginuid = 0; // or some other sensible default
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct task_struct *parent = BPF_CORE_READ(task, real_parent);
+    
+    if (parent) {
+        e.loginuid = BPF_CORE_READ(parent, loginuid.val);
     } else {
-        // Only read loginuid if the parent pointer is valid
-        bpf_probe_read(&e.loginuid, sizeof(e.loginuid), &parent->loginuid);
+        e.loginuid = 4294967295; // AUDIT_UID_UNSET
     }
 
     bpf_printk("BPF DEBUG: pid=%d uid=%d euid=%d loginuid=%d", e.pid, e.uid, e.euid, e.loginuid);
     
     // Check ignored UIDs
-    __u32 *ignore = bpf_map_lookup_elem(&ignore_uids_map, &e.uid);
-    if (!ignore) {
-        ignore = bpf_map_lookup_elem(&ignore_uids_map, &e.loginuid);
+    // 1. If the original user (loginuid) is ignored, ignore the event.
+    __u32 *ignore_login = bpf_map_lookup_elem(&ignore_uids_map, &e.loginuid);
+    if (ignore_login) return 0;
+
+    // 2. If the effective user (uid) is ignored, we need to check if it's a sudo action.
+    __u32 *ignore_uid = bpf_map_lookup_elem(&ignore_uids_map, &e.uid);
+    if (ignore_uid) {
+        // If loginuid is unset or same as uid, it's a direct action by the ignored user -> Ignore.
+        // If loginuid is different and valid (and not ignored, checked above), it's likely sudo -> Capture.
+        if (e.loginuid == 4294967295 || e.loginuid == e.uid) {
+            return 0;
+        }
     }
-    if (ignore) return 0;
 
     // Get process info
     e.pid = bpf_get_current_pid_tgid() >> 32;
     bpf_get_current_comm(&e.comm, sizeof(e.comm));
     e.flags = flags;
+    e.event_type = type;
     
     bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &e, sizeof(e));
     return 0;
@@ -107,7 +114,17 @@ static inline int handle_event(struct sys_enter_args *ctx, const char *filename_
 
 SEC("tracepoint/syscalls/sys_enter_openat")
 int trace_openat(struct sys_enter_args *ctx) {
-    return handle_event(ctx, (const char *)ctx->args[1], (__u32)ctx->args[2]);
+    return handle_event(ctx, (const char *)ctx->args[1], (__u32)ctx->args[2], 0);
+}
+
+SEC("tracepoint/syscalls/sys_enter_unlinkat")
+int trace_unlinkat(struct sys_enter_args *ctx) {
+    return handle_event(ctx, (const char *)ctx->args[1], (__u32)ctx->args[2], 1);
+}
+
+SEC("tracepoint/syscalls/sys_enter_unlink")
+int trace_unlink(struct sys_enter_args *ctx) {
+    return handle_event(ctx, (const char *)ctx->args[0], 0, 1);
 }
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";

@@ -4,7 +4,7 @@ A lightweight eBPF program to monitor file creation and modification events on L
 
 ## Features
 
-- **Kernel-level Monitoring**: Traces file operations (`touch`, `write`, etc.) directly from the kernel.
+- **Kernel-level Monitoring**: Traces file operations (`touch`, `nano`, etc.) directly from the kernel.
 - **CO-RE Support**: Designed to work with Compile Once – Run Everywhere (CO-RE) on kernels that support it (Kernel 5.x+).
 - **Configurable Filtering**: Filter events by file path, action, or user via a simple YAML configuration.
 - **Low Noise**: Filters events in the kernel before they reach userspace, reducing overhead.

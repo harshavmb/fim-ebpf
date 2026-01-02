@@ -54,7 +54,9 @@ type tracepointSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tracepointProgramSpecs struct {
-	TraceOpenat *ebpf.ProgramSpec `ebpf:"trace_openat"`
+	TraceOpenat   *ebpf.ProgramSpec `ebpf:"trace_openat"`
+	TraceUnlink   *ebpf.ProgramSpec `ebpf:"trace_unlink"`
+	TraceUnlinkat *ebpf.ProgramSpec `ebpf:"trace_unlinkat"`
 }
 
 // tracepointMapSpecs contains maps before they are loaded into the kernel.
@@ -115,12 +117,16 @@ type tracepointVariables struct {
 //
 // It can be passed to loadTracepointObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tracepointPrograms struct {
-	TraceOpenat *ebpf.Program `ebpf:"trace_openat"`
+	TraceOpenat   *ebpf.Program `ebpf:"trace_openat"`
+	TraceUnlink   *ebpf.Program `ebpf:"trace_unlink"`
+	TraceUnlinkat *ebpf.Program `ebpf:"trace_unlinkat"`
 }
 
 func (p *tracepointPrograms) Close() error {
 	return _TracepointClose(
 		p.TraceOpenat,
+		p.TraceUnlink,
+		p.TraceUnlinkat,
 	)
 }
 
