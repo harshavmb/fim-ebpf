@@ -110,14 +110,4 @@ int trace_openat(struct sys_enter_args *ctx) {
     return handle_event(ctx, (const char *)ctx->args[1], (__u32)ctx->args[2]);
 }
 
-SEC("tracepoint/syscalls/sys_enter_unlink")
-int trace_unlink(struct sys_enter_args *ctx) {
-    return handle_event(ctx, (const char *)ctx->args[0], 0);
-}
-
-SEC("tracepoint/syscalls/sys_enter_unlinkat")
-int trace_unlinkat(struct sys_enter_args *ctx) {
-    return handle_event(ctx, (const char *)ctx->args[1], (__u32)ctx->args[2]);
-}
-
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
