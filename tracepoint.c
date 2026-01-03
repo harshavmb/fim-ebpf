@@ -18,6 +18,7 @@ struct event {
     __u32 euid;
     __u32 loginuid;
     __u32 filename_hash;  // Hash of filename for matching
+    __u32 parent_hash;    // Hash of the parent directory (if matched via inode)
     char comm[16];
     char filename[256];   // Full filename for userspace verification
     __u32 flags;
@@ -44,16 +45,34 @@ struct {
     __uint(max_entries, 16);
 } ignore_uids_map SEC(".maps");
 
-// Simple hash function that the verifier can understand
-static inline __u32 simple_hash(const char *str) {
-    __u32 hash = 5381;
-    for (int i = 0; i < 256 && str[i] != '\0'; i++) {
-        hash = ((hash << 5) + hash) + str[i];  // hash * 33 + c
-    }
-    return hash;
-}
+struct dedup_key {
+    __u32 pid;
+    __u32 file_hash;
+};
 
-static inline int handle_event(struct sys_enter_args *ctx, const char *filename_ptr, __u32 flags, __u32 type) {
+struct inode_key {
+    __u32 dev;
+    __u32 pad; // Explicit padding to match Go struct and ensure 16-byte alignment
+    __u64 ino;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(key_size, sizeof(struct dedup_key));
+    __uint(value_size, sizeof(__u64));
+    __uint(max_entries, 1024);
+} dedup_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(key_size, sizeof(struct inode_key));
+    __uint(value_size, sizeof(__u32));
+    __uint(max_entries, 64);
+} monitored_inodes_map SEC(".maps");
+
+#define AT_FDCWD -100
+
+static inline int handle_event(struct sys_enter_args *ctx, int dfd, const char *filename_ptr, __u32 flags, __u32 type) {
     struct event e = {};
     long ret;
     
@@ -61,15 +80,97 @@ static inline int handle_event(struct sys_enter_args *ctx, const char *filename_
     ret = bpf_probe_read_user_str(e.filename, sizeof(e.filename), (void *)filename_ptr);
     if (ret <= 0) return 0;
 
-    // Debug: Print every filename accessed
-    bpf_printk("file accessed: %s", e.filename);
+    // Calculate filename hash and check prefixes for directory monitoring
+    __u32 hash = 5381;
+    int matched = 0;
+    
+    #pragma unroll
+    for (int i = 0; i < 256; i++) {
+        unsigned char c = (unsigned char)e.filename[i];
+        if (c == '\0') {
+            // End of string. Check full hash.
+            __u32 *match = bpf_map_lookup_elem(&target_hashes_map, &hash);
+            if (match) matched = 1;
+            break;
+        }
+        
+        if (c == '/') {
+            // Check if the prefix (directory) is monitored
+            // Note: hash currently contains the hash of the string up to (but not including) this slash
+            // e.g. for "/tmp/file", at first slash, hash is hash("").
+            // at second slash, hash is hash("/tmp").
+            
+            // Special case for root directory "/"
+            if (i == 0) {
+                // For root, we need to include the slash in the hash check
+                // But we haven't updated 'hash' with '/' yet.
+                // Let's update it temporarily or just handle it.
+                // Actually, standard DJB2: hash = ((hash << 5) + hash) + c;
+                __u32 root_hash = ((hash << 5) + hash) + '/';
+                __u32 *match = bpf_map_lookup_elem(&target_hashes_map, &root_hash);
+                if (match) matched = 1;
+            } else {
+                // For other directories, we check the hash accumulated so far (without the trailing slash)
+                // e.g. "/tmp"
+                __u32 *match = bpf_map_lookup_elem(&target_hashes_map, &hash);
+                if (match) matched = 1;
+            }
+        }
+        
+        hash = ((hash << 5) + hash) + c;
+    }
+    
+    e.filename_hash = hash;
 
-    // Calculate filename hash
-    e.filename_hash = simple_hash(e.filename);
+    // Check if the full filename is monitored (exact match)
+    if (!matched) {
+        __u32 *match = bpf_map_lookup_elem(&target_hashes_map, &hash);
+        if (match) matched = 1;
+    }
 
-    // Check if hash matches any monitored files
-    __u32 *match = bpf_map_lookup_elem(&target_hashes_map, &e.filename_hash);
-    if (!match) return 0;
+    // If not matched by path, check if we are in a monitored directory (CWD)
+    // Only for relative paths and when using AT_FDCWD
+    if (!matched && e.filename[0] != '/') {
+        if (dfd == AT_FDCWD) {
+            struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+            // Walk task->fs->pwd.dentry->d_inode
+            struct fs_struct *fs = BPF_CORE_READ(task, fs);
+            if (fs) {
+                struct path pwd = BPF_CORE_READ(fs, pwd);
+                struct dentry *dentry = pwd.dentry;
+                struct inode *inode = BPF_CORE_READ(dentry, d_inode);
+                struct super_block *sb = BPF_CORE_READ(inode, i_sb);
+                
+                struct inode_key ikey = {};
+                ikey.ino = BPF_CORE_READ(inode, i_ino);
+                ikey.dev = BPF_CORE_READ(sb, s_dev);
+
+                __u32 *match = bpf_map_lookup_elem(&monitored_inodes_map, &ikey);
+                if (match) {
+                    matched = 1;
+                    e.parent_hash = *match; // Store the hash of the parent directory
+
+                }
+            }
+        }
+    }
+
+    if (!matched) return 0;
+
+    // Deduplication logic
+    struct dedup_key dkey = {};
+    dkey.pid = bpf_get_current_pid_tgid() >> 32;
+    dkey.file_hash = e.filename_hash;
+    
+    __u64 ts = bpf_ktime_get_ns();
+    __u64 *last_ts = bpf_map_lookup_elem(&dedup_map, &dkey);
+    
+    if (last_ts) {
+        if (ts - *last_ts < 1000000000) { // 1 second threshold
+            return 0;
+        }
+    }
+    bpf_map_update_elem(&dedup_map, &dkey, &ts, BPF_ANY);
 
     // Get UID information
     __u64 uid_gid = bpf_get_current_uid_gid();
@@ -77,16 +178,9 @@ static inline int handle_event(struct sys_enter_args *ctx, const char *filename_
     e.euid = (uid_gid >> 32);
     
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    struct task_struct *parent = BPF_CORE_READ(task, real_parent);
-    
-    if (parent) {
-        e.loginuid = BPF_CORE_READ(parent, loginuid.val);
-    } else {
-        e.loginuid = 4294967295; // AUDIT_UID_UNSET
-    }
+    // Read loginuid from the task itself, not parent
+    e.loginuid = BPF_CORE_READ(task, loginuid.val);
 
-    bpf_printk("BPF DEBUG: pid=%d uid=%d euid=%d loginuid=%d", e.pid, e.uid, e.euid, e.loginuid);
-    
     // Check ignored UIDs
     // 1. If the original user (loginuid) is ignored, ignore the event.
     __u32 *ignore_login = bpf_map_lookup_elem(&ignore_uids_map, &e.loginuid);
@@ -107,6 +201,8 @@ static inline int handle_event(struct sys_enter_args *ctx, const char *filename_
     bpf_get_current_comm(&e.comm, sizeof(e.comm));
     e.flags = flags;
     e.event_type = type;
+
+    bpf_printk("BPF DEBUG: Sending event pid=%d file=%s", e.pid, e.filename);
     
     bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &e, sizeof(e));
     return 0;
@@ -114,17 +210,24 @@ static inline int handle_event(struct sys_enter_args *ctx, const char *filename_
 
 SEC("tracepoint/syscalls/sys_enter_openat")
 int trace_openat(struct sys_enter_args *ctx) {
-    return handle_event(ctx, (const char *)ctx->args[1], (__u32)ctx->args[2], 0);
+    return handle_event(ctx, (int)ctx->args[0], (const char *)ctx->args[1], (__u32)ctx->args[2], 0);
+}
+
+SEC("tracepoint/syscalls/sys_enter_openat2")
+int trace_openat2(struct sys_enter_args *ctx) {
+    // openat2(int dfd, const char *filename, struct open_how *how, size_t size)
+    // args[0] = dfd, args[1] = filename
+    return handle_event(ctx, (int)ctx->args[0], (const char *)ctx->args[1], 0, 0);
 }
 
 SEC("tracepoint/syscalls/sys_enter_unlinkat")
 int trace_unlinkat(struct sys_enter_args *ctx) {
-    return handle_event(ctx, (const char *)ctx->args[1], (__u32)ctx->args[2], 1);
+    return handle_event(ctx, (int)ctx->args[0], (const char *)ctx->args[1], (__u32)ctx->args[2], 1);
 }
 
 SEC("tracepoint/syscalls/sys_enter_unlink")
 int trace_unlink(struct sys_enter_args *ctx) {
-    return handle_event(ctx, (const char *)ctx->args[0], 0, 1);
+    return handle_event(ctx, AT_FDCWD, (const char *)ctx->args[0], 0, 1);
 }
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";

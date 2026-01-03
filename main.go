@@ -10,7 +10,10 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
@@ -30,6 +33,7 @@ type event struct {
 	Euid         uint32
 	Loginuid     uint32
 	FilenameHash uint32
+	ParentHash   uint32 // Hash of the parent directory (if matched via inode)
 	Comm         [16]byte
 	Filename     [256]byte
 	Flags        uint32
@@ -85,20 +89,58 @@ func main() {
 	}
 	defer objs.Close()
 
+	// Map to store hash -> path for reverse lookup
+	hashToPath := make(map[uint32]string)
+
 	// Populate filename hashes
 	for _, file := range cfg.MonitoredFiles {
-		hash := simpleHash(file)
+		// Clean the path to remove trailing slashes, etc.
+		cleanPath := filepath.Clean(file)
+		hash := simpleHash(cleanPath)
 		val := uint32(1) // Just a marker
+
+		hashToPath[hash] = cleanPath
+
 		if err := objs.TargetHashesMap.Put(hash, val); err != nil {
-			log.Fatalf("Failed to add hash for %s: %v", file, err)
+			log.Fatalf("Failed to add hash for %s: %v", cleanPath, err)
 		}
 
 		// Add basename hash to capture relative accesses (e.g. open("file") when in /etc)
-		base := filepath.Base(file)
-		if base != file {
+		base := filepath.Base(cleanPath)
+		if base != cleanPath {
 			baseHash := simpleHash(base)
 			if err := objs.TargetHashesMap.Put(baseHash, val); err != nil {
 				log.Printf("Failed to add basename hash for %s: %v", base, err)
+			}
+		}
+
+		// Get Inode info for directory monitoring (to support relative paths inside monitored dirs)
+		info, err := os.Stat(cleanPath)
+		if err == nil && info.IsDir() {
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if ok {
+				// Key must match C struct layout: u32 dev, u64 ino
+				// Go struct with uint32, uint64 has automatic padding to match C
+				type InodeKey struct {
+					Dev uint32
+					Pad uint32 // Explicit padding to match C struct alignment (16 bytes total)
+					Ino uint64
+				}
+
+				// Convert userspace dev_t to kernel internal format (new_encode_dev)
+				// Kernel uses (major << 20) | minor for s_dev
+				major := unix.Major(stat.Dev)
+				minor := unix.Minor(stat.Dev)
+				kernelDev := (uint32(major) << 20) | uint32(minor)
+
+				key := InodeKey{
+					Dev: kernelDev,
+					Ino: uint64(stat.Ino),
+				}
+				// Store the hash of the directory path as the value
+				if err := objs.MonitoredInodesMap.Put(key, hash); err != nil {
+					log.Printf("Failed to add inode for %s: %v", cleanPath, err)
+				}
 			}
 		}
 	}
@@ -125,6 +167,14 @@ func main() {
 		log.Fatal(err)
 	}
 	defer tp.Close()
+
+	// Try to attach to openat2 if available
+	tpOpenat2, err := link.Tracepoint("syscalls", "sys_enter_openat2", objs.TraceOpenat2, nil)
+	if err == nil {
+		defer tpOpenat2.Close()
+	} else {
+		// It's fine if openat2 doesn't exist (older kernels)
+	}
 
 	tpUnlink, err := link.Tracepoint("syscalls", "sys_enter_unlink", objs.TraceUnlink, nil)
 	if err != nil {
@@ -174,24 +224,55 @@ func main() {
 			matched := false
 			currentFile := string(bytes.TrimRight(e.Filename[:], "\x00"))
 
-			// Resolve relative path
-			resolvedFile := currentFile
-			if !filepath.IsAbs(currentFile) {
-				// Get CWD for the pid
-				cwdLink := fmt.Sprintf("/proc/%d/cwd", e.Pid)
-				cwd, err := os.Readlink(cwdLink)
-				if err == nil {
-					resolvedFile = filepath.Join(cwd, currentFile)
+			// Check if the file matches any monitored file or directory
+			for _, monitored := range cfg.MonitoredFiles {
+				// Exact match
+				if currentFile == monitored {
+					matched = true
+					break
 				}
-			}
-
-			for _, file := range cfg.MonitoredFiles {
-				if resolvedFile == file || currentFile == file {
+				// Directory prefix match
+				if strings.HasPrefix(currentFile, monitored+"/") {
 					matched = true
 					break
 				}
 			}
+
+			// If not matched yet, check if we have a ParentHash from the kernel (Inode match)
+			if !matched && e.ParentHash != 0 {
+				if parentPath, ok := hashToPath[e.ParentHash]; ok {
+					// We know the parent directory, so we can construct the full path
+					// This is reliable even if the process has exited
+					resolvedFile := filepath.Join(parentPath, currentFile)
+
+					// Since the kernel matched the inode, we know it's monitored.
+					// But we double check just to be safe and to set 'matched'
+					matched = true
+					// Update currentFile to the full path for logging
+					currentFile = resolvedFile
+				}
+			}
+
+			// If still not matched, try to resolve relative path via /proc (fallback)
+			if !matched && !filepath.IsAbs(currentFile) {
+				// Get CWD for the pid
+				cwdLink := fmt.Sprintf("/proc/%d/cwd", e.Pid)
+				cwd, err := os.Readlink(cwdLink)
+				if err == nil {
+					resolvedFile := filepath.Join(cwd, currentFile)
+					for _, monitored := range cfg.MonitoredFiles {
+						if resolvedFile == monitored || strings.HasPrefix(resolvedFile, monitored+"/") {
+							matched = true
+							// Update currentFile to the full path for logging
+							currentFile = resolvedFile
+							break
+						}
+					}
+				}
+			}
+
 			if !matched {
+				// log.Printf("Debug: Dropping event for %s (not matched in userspace)", currentFile)
 				continue
 			}
 
@@ -231,7 +312,7 @@ func main() {
 				e.Uid,
 				userInfo,
 				string(bytes.TrimRight(e.Comm[:], "\x00")),
-				string(bytes.TrimRight(e.Filename[:], "\x00")),
+				currentFile,
 				action,
 				e.Flags,
 			)

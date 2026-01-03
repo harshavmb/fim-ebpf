@@ -55,6 +55,7 @@ type tracepointSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type tracepointProgramSpecs struct {
 	TraceOpenat   *ebpf.ProgramSpec `ebpf:"trace_openat"`
+	TraceOpenat2  *ebpf.ProgramSpec `ebpf:"trace_openat2"`
 	TraceUnlink   *ebpf.ProgramSpec `ebpf:"trace_unlink"`
 	TraceUnlinkat *ebpf.ProgramSpec `ebpf:"trace_unlinkat"`
 }
@@ -63,9 +64,11 @@ type tracepointProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tracepointMapSpecs struct {
-	Events          *ebpf.MapSpec `ebpf:"events"`
-	IgnoreUidsMap   *ebpf.MapSpec `ebpf:"ignore_uids_map"`
-	TargetHashesMap *ebpf.MapSpec `ebpf:"target_hashes_map"`
+	DedupMap           *ebpf.MapSpec `ebpf:"dedup_map"`
+	Events             *ebpf.MapSpec `ebpf:"events"`
+	IgnoreUidsMap      *ebpf.MapSpec `ebpf:"ignore_uids_map"`
+	MonitoredInodesMap *ebpf.MapSpec `ebpf:"monitored_inodes_map"`
+	TargetHashesMap    *ebpf.MapSpec `ebpf:"target_hashes_map"`
 }
 
 // tracepointVariableSpecs contains global variables before they are loaded into the kernel.
@@ -94,15 +97,19 @@ func (o *tracepointObjects) Close() error {
 //
 // It can be passed to loadTracepointObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tracepointMaps struct {
-	Events          *ebpf.Map `ebpf:"events"`
-	IgnoreUidsMap   *ebpf.Map `ebpf:"ignore_uids_map"`
-	TargetHashesMap *ebpf.Map `ebpf:"target_hashes_map"`
+	DedupMap           *ebpf.Map `ebpf:"dedup_map"`
+	Events             *ebpf.Map `ebpf:"events"`
+	IgnoreUidsMap      *ebpf.Map `ebpf:"ignore_uids_map"`
+	MonitoredInodesMap *ebpf.Map `ebpf:"monitored_inodes_map"`
+	TargetHashesMap    *ebpf.Map `ebpf:"target_hashes_map"`
 }
 
 func (m *tracepointMaps) Close() error {
 	return _TracepointClose(
+		m.DedupMap,
 		m.Events,
 		m.IgnoreUidsMap,
+		m.MonitoredInodesMap,
 		m.TargetHashesMap,
 	)
 }
@@ -118,6 +125,7 @@ type tracepointVariables struct {
 // It can be passed to loadTracepointObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tracepointPrograms struct {
 	TraceOpenat   *ebpf.Program `ebpf:"trace_openat"`
+	TraceOpenat2  *ebpf.Program `ebpf:"trace_openat2"`
 	TraceUnlink   *ebpf.Program `ebpf:"trace_unlink"`
 	TraceUnlinkat *ebpf.Program `ebpf:"trace_unlinkat"`
 }
@@ -125,6 +133,7 @@ type tracepointPrograms struct {
 func (p *tracepointPrograms) Close() error {
 	return _TracepointClose(
 		p.TraceOpenat,
+		p.TraceOpenat2,
 		p.TraceUnlink,
 		p.TraceUnlinkat,
 	)

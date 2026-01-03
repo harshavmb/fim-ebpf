@@ -2,6 +2,7 @@ monitored_files:
   - /tmp/testfile
   - /etc/passwd
   - /etc/shadow
+  - /tmp # supports monitoring directories
 
 ignore_actions:
   - read

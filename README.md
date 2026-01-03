@@ -7,8 +7,9 @@ A lightweight eBPF program to monitor file creation and modification events on L
 - **Kernel-level Monitoring**: Traces file operations (`touch`, `nano`, etc.) directly from the kernel.
 - **CO-RE Support**: Designed to work with Compile Once – Run Everywhere (CO-RE) on kernels that support it (Kernel 5.x+).
 - **Configurable Filtering**: Filter events by file path, action, or user via a simple YAML configuration.
+- **Directory Monitoring**: Supports monitoring entire directories recursively. Any file accessed within a monitored directory (e.g., `/tmp`) will be tracked.
 - **Low Noise**: Filters events in the kernel before they reach userspace, reducing overhead.
-- **Absolute/Relative paths** - Whether user access the sensitive file over relative/absolute paths ie., `testfile` by switching to `/tmp` in addition to accessing directly `/tmp/testfile`
+- **Path Resolution**: Handles both absolute and relative paths (e.g., `cd /tmp; touch file`) correctly by tracking directory inodes in the kernel.
 
 ## Prerequisites
 
@@ -41,6 +42,7 @@ go build -o fim-ebpf .
       - /tmp/testfile
       - /etc/passwd
       - /etc/shadow
+      - /tmp ## monitor the entire directory
     ignore_actions:
       - read
       - stat
@@ -60,6 +62,7 @@ go build -o fim-ebpf .
 2025/08/18 07:22:09 Monitoring started. Ctrl+C to exit.
 2025/08/18 07:22:37 Event: PID=1745080 UID=6087179 (6087179 (harsha)) CMD=touch FILE=/tmp/testfile FLAGS=00000941 ## actual user
 2025/08/18 07:22:54 Event: PID=1745108 UID=0 (0 (root) [Login: 6087179 (harsha)]) CMD=touch FILE=/tmp/testfile FLAGS=00000941 ## even after sudo
+2026/01/03 18:55:56 Event: PID=3718310 UID=1002 (1002 (harsha)) CMD=touch FILE=/tmp/testfile ACTION=OPEN FLAGS=00000941 ## monitoring files in a dir
 ```
 
 ## Architecture
