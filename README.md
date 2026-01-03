@@ -8,6 +8,7 @@ A lightweight eBPF program to monitor file creation and modification events on L
 - **CO-RE Support**: Designed to work with Compile Once – Run Everywhere (CO-RE) on kernels that support it (Kernel 5.x+).
 - **Configurable Filtering**: Filter events by file path, action, or user via a simple YAML configuration.
 - **Low Noise**: Filters events in the kernel before they reach userspace, reducing overhead.
+- **Absolute/Relative paths** - Whether user access the sensitive file over relative/absolute paths ie., `testfile` by switching to `/tmp` in addition to accessing directly `/tmp/testfile`
 
 ## Prerequisites
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"path/filepath"
 	"syscall"
 
 	"github.com/cilium/ebpf/link"
@@ -91,6 +92,15 @@ func main() {
 		if err := objs.TargetHashesMap.Put(hash, val); err != nil {
 			log.Fatalf("Failed to add hash for %s: %v", file, err)
 		}
+
+		// Add basename hash to capture relative accesses (e.g. open("file") when in /etc)
+		base := filepath.Base(file)
+		if base != file {
+			baseHash := simpleHash(base)
+			if err := objs.TargetHashesMap.Put(baseHash, val); err != nil {
+				log.Printf("Failed to add basename hash for %s: %v", base, err)
+			}
+		}
 	}
 
 	// Populate ignored UIDs
@@ -163,8 +173,20 @@ func main() {
 			// Final verification in userspace
 			matched := false
 			currentFile := string(bytes.TrimRight(e.Filename[:], "\x00"))
+
+			// Resolve relative path
+			resolvedFile := currentFile
+			if !filepath.IsAbs(currentFile) {
+				// Get CWD for the pid
+				cwdLink := fmt.Sprintf("/proc/%d/cwd", e.Pid)
+				cwd, err := os.Readlink(cwdLink)
+				if err == nil {
+					resolvedFile = filepath.Join(cwd, currentFile)
+				}
+			}
+
 			for _, file := range cfg.MonitoredFiles {
-				if currentFile == file {
+				if resolvedFile == file || currentFile == file {
 					matched = true
 					break
 				}
