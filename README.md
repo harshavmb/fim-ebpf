@@ -56,8 +56,6 @@ go build -o fim-ebpf .
 ### Example Output
 
 ```text
-2025/08/18 07:22:09 Warning: user backupuser not found
-2025/08/18 07:22:09 Warning: user harsha not found
 2025/08/18 07:22:09 Monitoring started. Ctrl+C to exit.
 2025/08/18 07:22:37 Event: PID=1745080 UID=6087179 (6087179 (harsha)) CMD=touch FILE=/tmp/testfile FLAGS=00000941 ## actual user
 2025/08/18 07:22:54 Event: PID=1745108 UID=0 (0 (root) [Login: 6087179 (harsha)]) CMD=touch FILE=/tmp/testfile FLAGS=00000941 ## even after sudo
